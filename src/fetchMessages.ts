@@ -6,7 +6,7 @@ import vanillaPuppeteer from 'puppeteer'
 import { formatISO } from 'date-fns'
 import fs from 'fs'
 import path from 'path'
-import parse from 'csv-parse'
+import { createObjectCsvWriter } from 'csv-writer'
 
 function convertDynamicTimeToISO(timeString: string) {
   const units = timeString.split(' ')[1]
@@ -38,12 +38,61 @@ export async function fetchMessages(phoneUrls: string[]) {
   const cluster = await Cluster.launch({
     puppeteer,
     maxConcurrency: 20,
+    retryLimit: 2,
+    retryDelay: 5_000,
     concurrency: Cluster.CONCURRENCY_CONTEXT,
+    monitor: true,
   })
+  cluster.on('taskerror', (err, data) => {
+    console.log(`Error crawling ${data}: ${err.message}`)
+  })
+
+  // Find or create CSV file
+  const dataPath = path.join(__dirname, '..', 'messages.csv')
+  const csvWriter = createObjectCsvWriter({
+    path: dataPath,
+    header: [
+      { id: 'timestamp', title: 'TIMESTAMP' },
+      { id: 'country', title: 'COUNTRY' },
+      { id: 'sender', title: 'SENDER' },
+      { id: 'receiver', title: 'RECEIVER' },
+      { id: 'message', title: 'MESSAGE' },
+    ],
+    append: fs.existsSync(dataPath),
+  })
+
+  // Define task to fetch messages from a given phone number
   await cluster.task(async ({ page, data: url }) => {
+    // Define task variables
+    const receiver = `+${url.split('/').filter(Boolean).pop()}`
+    const country = url.split('/').filter(Boolean).slice(-2, -1)[0] || ''
+
+    // Go to the URL and attempt to load its contents
+    console.log(`📞 Fetching ${receiver}`)
     await page.goto(url)
-    await page.waitForSelector('.flag-icon', { timeout: 5_000 })
-    const sms = await page.evaluate(() =>
+    try {
+      await page.waitForSelector('td[_ngcontent-serverapp-c10]', {
+        timeout: 5_000,
+      })
+    } catch (e) {
+      // Identify if the page just has no messages
+      const pageContent = await page.content()
+      const tbodyRegex = /<tbody.*?>([\s\S]*?)<\/tbody>/
+      const tbodyMatch = tbodyRegex.exec(pageContent)
+      const tbody = tbodyMatch?.[0] || ''
+      if (
+        tbody ===
+        '<tbody _ngcontent-serverapp-c10=""><!----><!----><!----><!----></tbody>'
+      ) {
+        console.warn(`❎ 0 messages found for ${receiver}`)
+        return []
+      } else {
+        throw e
+      }
+    }
+
+    // Extract messages from the page, if possible
+    const messages = await page.evaluate(() =>
       Array.from(document.querySelectorAll('tr[_ngcontent-serverapp-c10]'))
         .filter((e: any) => e.nodeName === 'TR')
         .filter(
@@ -63,80 +112,36 @@ export async function fetchMessages(phoneUrls: string[]) {
           }
         }),
     )
-    sms.forEach(message => {
-      message.receiver = url.split('/').filter(Boolean).pop() || ''
-      message.country = url.split('/').filter(Boolean).slice(-2, -1)[0] || ''
+
+    // Prepare messages for CSV
+    if (messages.length === 0) {
+      console.warn(
+        '⛔ Unexpected: No messages found despite TD elements existing in body',
+      )
+      return []
+    }
+    messages.forEach(message => {
+      message.receiver = receiver
+      message.country = country
+      message.timestamp =
+        message.timestamp != ''
+          ? convertDynamicTimeToISO(message.timestamp)
+          : ''
     })
-    return sms
+
+    // Write messages to CSV
+    await csvWriter.writeRecords(messages)
+    console.log(
+      `📨 ${messages.length} messages written for ${receiver} (${country})`,
+    )
+
+    return messages
   })
 
   // Begin queueing tasks to get phone numbers from all countries concurrently
-  const smsPromises = phoneUrls.map(phone => cluster.execute(phone))
-  try {
-    // Wait for all tasks to complete
-    const smsMessages = await Promise.all(smsPromises)
-    let flattenedSmsMessages = [...new Set(smsMessages.flat())]
-    flattenedSmsMessages.forEach(sms => {
-      if (sms.timestamp) {
-        sms.timestamp = convertDynamicTimeToISO(sms.timestamp)
-      }
-    })
+  phoneUrls.forEach(phone => cluster.queue(phone))
 
-    // Find or create CSV file
-    const dataPath = path.join(__dirname, '..', 'messages.csv')
-    const createCsvWriter = require('csv-writer').createObjectCsvWriter
-    const csvWriter = createCsvWriter({
-      path: dataPath,
-      header: [
-        { id: 'timestamp', title: 'TIMESTAMP' },
-        { id: 'country', title: 'COUNTRY' },
-        { id: 'sender', title: 'SENDER' },
-        { id: 'receiver', title: 'RECEIVER' },
-        { id: 'message', title: 'MESSAGE' },
-      ],
-      append: fs.existsSync(dataPath),
-    })
-
-    // Read existing data, if exists
-    let existingData = ''
-    let records: any[] = []
-    if (fs.existsSync(dataPath)) {
-      existingData = fs.readFileSync(dataPath, 'utf8')
-      parse.parse(
-        existingData,
-        { columns: true, relax_column_count: true },
-        (err, output) => {
-          if (err) {
-            console.error(err)
-          } else {
-            records = output
-          }
-        },
-      )
-    }
-
-    // Filter out messages that already exist in the CSV
-    const newMessages = flattenedSmsMessages.filter(
-      sms =>
-        !records.some(
-          (record: any) =>
-            record.sender === sms.sender &&
-            record.message === sms.message &&
-            record.country === sms.country &&
-            record.receiver === sms.receiver,
-        ),
-    )
-
-    // Write new messages to CSV
-    await csvWriter.writeRecords(newMessages)
-    console.log('The CSV file was written successfully')
-    return flattenedSmsMessages
-  } catch (e) {
-    console.error(e)
-    throw e
-  } finally {
-    // Gracefully close the cluster
-    await cluster.idle()
-    await cluster.close()
-  }
+  // Gracefully close the cluster
+  await cluster.idle()
+  await cluster.close()
 }

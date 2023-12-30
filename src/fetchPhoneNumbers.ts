@@ -12,9 +12,14 @@ export async function fetchPhoneNumbers(countryUrls: string[]) {
   const cluster = await Cluster.launch({
     puppeteer,
     maxConcurrency: 5,
+    retryLimit: 3,
+    retryDelay: 5_000,
     concurrency: Cluster.CONCURRENCY_CONTEXT,
   })
   await cluster.task(async ({ page, data: url }) => {
+    console.log(
+      `❊ Fetching phone numbers from ${url.split('/').filter(Boolean).pop()}`,
+    )
     await page.goto(url)
     await page.waitForSelector('.flag-icon', { timeout: 5_000 })
     const numbers = await page.evaluate(() =>
@@ -40,7 +45,7 @@ export async function fetchPhoneNumbers(countryUrls: string[]) {
     return flattenedPhoneNumbers
   } catch (e) {
     console.error(e)
-    throw e
+    return []
   } finally {
     // Gracefully close the cluster
     await cluster.idle()

@@ -9,6 +9,12 @@ import { fetchCountries } from '@fetchCountries'
  * because these are often OTP codes - meaning we can use these as training data. We fetch all available
  * countries, then fetch all available phone numbers for each country, then fetch all available messages,
  * and persist them to a CSV file.
+ *
+ * At the time of writing this code, neither the T&Cs or Privacy Policy of Quakr.io forbid scraping their
+ * site, nor do they claim any IP rights or copyright over the data on their site. They also claim
+ * "no responsibility in the content of the messages", so I believe it's fair use to collect data from
+ * Quakr.io in this manner. Before using this tool, please double check any T&Cs/Privacy Policy documents
+ * on their site to make sure that you are not violating any of their terms by using this tool.
  */
 puppeteerExtra.use(Stealth())
 ;(async () => {
@@ -18,9 +24,8 @@ puppeteerExtra.use(Stealth())
 
   // Fetch phone numbers from separate function
   const flattenedPhoneNumbers = await fetchPhoneNumbers(countries)
-  console.log(`${flattenedPhoneNumbers.length} phone numbers identified`)
+  console.log(`✅ ${flattenedPhoneNumbers.length} phone numbers identified`)
 
   // Fetch SMS messages from separate function
-  const msgs = await fetchMessages(flattenedPhoneNumbers)
-  console.log(`${msgs.length} SMS messages identified`)
+  await fetchMessages(flattenedPhoneNumbers)
 })()
