@@ -37,7 +37,7 @@ export async function fetchMessages(phoneUrls: string[]) {
   puppeteer.use(Recaptcha())
   const cluster = await Cluster.launch({
     puppeteer,
-    maxConcurrency: 5,
+    maxConcurrency: 20,
     concurrency: Cluster.CONCURRENCY_CONTEXT,
   })
   await cluster.task(async ({ page, data: url }) => {
